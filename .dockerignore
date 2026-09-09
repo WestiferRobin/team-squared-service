@@ -1,0 +1,16 @@
+.git
+**/bin
+**/obj
+**/TestResults
+**/.vs
+**/.vscode
+**/.idea
+**/*.user
+**/*.suo
+**/.env
+**/.env.*
+**/artifacts
+**/CodeCoverage
+**/*.binlog
+**/*.log
+.DS_Store

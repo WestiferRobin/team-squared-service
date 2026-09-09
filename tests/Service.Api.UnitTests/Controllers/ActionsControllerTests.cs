@@ -1,0 +1,65 @@
+using Service.Api.Dtos.Action;
+using Service.Api.Dtos.Action.Responses;
+using Microsoft.AspNetCore.Mvc;
+using Service.Api.Controllers;
+using Service.Api.Dtos.Action.Requests;
+using Service.Api.Enums;
+using Service.Api.Services;
+using Xunit;
+
+namespace Service.Api.UnitTests.Controllers;
+
+public class ActionsControllerTests
+{
+    [Theory]
+    [InlineData("List")]
+    [InlineData("Get")]
+    [InlineData("Create")]
+    [InlineData("Update")]
+    [InlineData("Delete")]
+    public async Task Delegates_request_and_token_and_returns_expected_result(string operation)
+    {
+        var service = new RecordingActionService();
+        var controller = new ActionsController(service);
+        using var cancellation = new CancellationTokenSource();
+        var token = cancellation.Token;
+        var id = Guid.NewGuid();
+        var create = new CreateActionRequest { Name = "Create", ItemId = Guid.NewGuid(), Type = ActionType.Create };
+        var update = new UpdateActionRequest { Name = "Update", Type = ActionType.Update };
+        switch (operation)
+        {
+            case "List": AssertMappedList(service.Results, Assert.IsType<OkObjectResult>((await controller.List(token)).Result).Value); break;
+            case "Get": AssertMapped(service.Result, Assert.IsType<OkObjectResult>((await controller.Get(id, token)).Result).Value); break;
+            case "Create":
+                var created = Assert.IsType<CreatedAtActionResult>((await controller.Create(create, token)).Result);
+                Assert.Equal(201, created.StatusCode);
+                Assert.Equal("Get", created.ActionName);
+                Assert.Equal(service.Result.Id, created.RouteValues!["actionId"]);
+                AssertMapped(service.Result, created.Value);
+                Assert.Same(create, service.Request);
+                break;
+            case "Update":
+                AssertMapped(service.Result, Assert.IsType<OkObjectResult>((await controller.Update(id, update, token)).Result).Value);
+                Assert.Same(update, service.Request);
+                break;
+            case "Delete": Assert.Equal(204, Assert.IsType<NoContentResult>(await controller.Delete(id, token)).StatusCode); break;
+        }
+        Assert.Equal(operation, service.Operation);
+        Assert.Equal(1, service.Calls);
+        Assert.Equal(token, service.Token);
+        if (operation is "Get" or "Update" or "Delete") Assert.Equal(id, service.Id);
+    }
+
+    private static void AssertMapped(ActionDto expected, object? value)
+    {
+        var actual = Assert.IsType<ActionResponse>(value);
+        Assert.Equal((expected.Id, expected.ItemId, expected.Name, expected.Type, expected.CreatedAt, expected.UpdatedAt), (actual.Id, actual.ItemId, actual.Name, actual.Type, actual.CreatedAt, actual.UpdatedAt));
+    }
+
+    private static void AssertMappedList(IReadOnlyList<ActionDto> expected, object? value)
+    {
+        var actual = Assert.IsAssignableFrom<IReadOnlyList<ActionResponse>>(value);
+        Assert.Equal(expected.Count, actual.Count);
+        for (var i = 0; i < expected.Count; i++) AssertMapped(expected[i], actual[i]);
+    }
+}

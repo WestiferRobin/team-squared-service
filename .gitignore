@@ -38,6 +38,8 @@ ScaffoldingReadMe.txt
 
 # dotenv environment variables file
 .env
+.env.*
+!.env.example
 
 # Others
 ~$*
@@ -55,3 +57,15 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Local IDE, validation logs, and database/cache artifacts
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+*.log
+*.dump
+*.rdb
+*.aof
