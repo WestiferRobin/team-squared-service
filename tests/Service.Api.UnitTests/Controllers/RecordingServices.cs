@@ -10,14 +10,16 @@ namespace Service.Api.UnitTests.Controllers;
 internal sealed class RecordingItemService : IItemService
 {
     public ItemDto Result { get; } = new ItemDto { Id = Guid.NewGuid(), Name = "Result", Status = ItemStatus.Active, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-    public IReadOnlyList<ItemDto> Results { get; } = new[] { new ItemDto { Id = Guid.NewGuid(), Name = "First", Status = ItemStatus.Active, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow }, new ItemDto { Id = Guid.NewGuid(), Name = "Second", Status = ItemStatus.Active, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow } };
+    public IReadOnlyList<ItemDto> Results { get; set; } = new[] { new ItemDto { Id = Guid.NewGuid(), Name = "First", Status = ItemStatus.Active, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow }, new ItemDto { Id = Guid.NewGuid(), Name = "Second", Status = ItemStatus.Active, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow } };
     public string? Operation { get; private set; }
     public Guid Id { get; private set; }
     public object? Request { get; private set; }
     public CancellationToken Token { get; private set; }
+    public Exception? Failure { get; set; }
+    public List<(string Operation, Guid Id, object? Request, CancellationToken Token)> History { get; } = [];
     public int Calls { get; private set; }
     private void Record(string operation, CancellationToken token, Guid id = default, object? request = null)
-    { Operation = operation; Token = token; Id = id; Request = request; Calls++; }
+    { Operation = operation; Token = token; Id = id; Request = request; Calls++; History.Add((operation, id, request, token)); if (Failure is not null) throw Failure; }
     public Task<ItemDto> CreateAsync(CreateItemRequest request, CancellationToken cancellationToken = default)
     { Record("Create", cancellationToken, request: request); return Task.FromResult(Result); }
     public Task<ItemDto> GetAsync(Guid id, CancellationToken cancellationToken = default)
@@ -33,14 +35,16 @@ internal sealed class RecordingItemService : IItemService
 internal sealed class RecordingActionService : IActionService
 {
     public ActionDto Result { get; } = new ActionDto { Id = Guid.NewGuid(), ItemId = Guid.NewGuid(), Name = "Result", Type = ActionType.Create, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
-    public IReadOnlyList<ActionDto> Results { get; } = new[] { new ActionDto { Id = Guid.NewGuid(), ItemId = Guid.NewGuid(), Name = "First", Type = ActionType.Create, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow }, new ActionDto { Id = Guid.NewGuid(), ItemId = Guid.NewGuid(), Name = "Second", Type = ActionType.Create, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow } };
+    public IReadOnlyList<ActionDto> Results { get; set; } = new[] { new ActionDto { Id = Guid.NewGuid(), ItemId = Guid.NewGuid(), Name = "First", Type = ActionType.Create, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow }, new ActionDto { Id = Guid.NewGuid(), ItemId = Guid.NewGuid(), Name = "Second", Type = ActionType.Create, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow } };
     public string? Operation { get; private set; }
     public Guid Id { get; private set; }
     public object? Request { get; private set; }
     public CancellationToken Token { get; private set; }
+    public Exception? Failure { get; set; }
+    public List<(string Operation, Guid Id, object? Request, CancellationToken Token)> History { get; } = [];
     public int Calls { get; private set; }
     private void Record(string operation, CancellationToken token, Guid id = default, object? request = null)
-    { Operation = operation; Token = token; Id = id; Request = request; Calls++; }
+    { Operation = operation; Token = token; Id = id; Request = request; Calls++; History.Add((operation, id, request, token)); if (Failure is not null) throw Failure; }
     public Task<ActionDto> CreateAsync(CreateActionRequest request, CancellationToken cancellationToken = default)
     { Record("Create", cancellationToken, request: request); return Task.FromResult(Result); }
     public Task<ActionDto> GetAsync(Guid id, CancellationToken cancellationToken = default)

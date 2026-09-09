@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Service.Api.Dtos.Item;
+using Service.Api.Dtos.Action;
 using Service.Api.Enums;
 using Service.Api.Infrastructure.Cache;
 using Xunit;
@@ -20,6 +21,7 @@ public class RedisCacheTests
     {
         var json = new JsonOptions();
         json.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter<ItemStatus>(JsonNamingPolicy.CamelCase, false));
+        json.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter<ActionType>(JsonNamingPolicy.CamelCase, false));
         return new RedisCache(backing, Options.Create(json), logger ?? NullLogger<RedisCache>.Instance);
     }
 
@@ -46,40 +48,25 @@ public class RedisCacheTests
         Assert.Null(await cache.GetAsync<ItemDto>("test:item"));
     }
 
+    [Fact]
+    public async Task GetAsync_WhenJsonNull_ReturnsQuietMiss()
+    {
+        var logs = new CacheLogger();
+        var cache = Adapter(new FakeDistributedCache { Value = Encoding.UTF8.GetBytes("null") }, logs);
+        Assert.Null(await cache.GetAsync<ItemDto>("key"));
+        Assert.Empty(logs.Entries);
+    }
+
     [Theory]
-    [InlineData("not-json")]
-    [InlineData("{}")]
-    [InlineData("[]")]
-    [InlineData("null")]
-    public async Task Unusable_payload_is_not_a_hit(string payload)
+    [InlineData("not-json")] // Malformed JSON.
+    [InlineData("[]")]       // Valid JSON, wrong shape.
+    [InlineData("{}")]       // Object missing required members.
+    public async Task GetAsync_WhenPayloadInvalid_ReturnsMissWithSafeWarning(string payload)
     {
-        var cache = Adapter(new FakeDistributedCache { Value = Encoding.UTF8.GetBytes(payload) });
-        Assert.Null(await cache.GetAsync<ItemDto>("key"));
-    }
-
-    [Fact]
-    public async Task Provider_failures_are_misses_or_no_ops()
-    {
-        var cache = Adapter(new FakeDistributedCache { Fail = true });
-        Assert.Null(await cache.GetAsync<ItemDto>("key"));
-        await cache.SetAsync("key", new object(), TimeSpan.FromSeconds(1));
-        await cache.RemoveAsync("key");
-    }
-
-    [Fact]
-    public async Task Caller_cancellation_is_preserved()
-    {
-        var cache = Adapter(new FakeDistributedCache());
-        var token = new CancellationToken(true);
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.GetAsync<ItemDto>("key", token));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.SetAsync("key", new object(), TimeSpan.FromSeconds(1), token));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.RemoveAsync("key", token));
-    }
-
-    [Fact]
-    public async Task Nonpositive_TTL_is_rejected()
-    {
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Adapter(new FakeDistributedCache()).SetAsync("key", new object(), TimeSpan.Zero));
+        var logs = new CacheLogger();
+        var cache = Adapter(new FakeDistributedCache { Value = Encoding.UTF8.GetBytes(payload) }, logs);
+        Assert.Null(await cache.GetAsync<ItemDto>("KEY_SENTINEL"));
+        AssertSafeWarning(logs, "read", nameof(JsonException));
     }
 
     [Theory]
@@ -107,18 +94,22 @@ public class RedisCacheTests
     }
 
     [Theory]
-    [InlineData("read")]
-    [InlineData("write")]
-    [InlineData("removal")]
-    public async Task Provider_warnings_include_operation_and_type_but_no_sensitive_details(string operation)
+    [InlineData("read", false)]
+    [InlineData("write", false)]
+    [InlineData("removal", false)]
+    [InlineData("read", true)]
+    [InlineData("write", true)]
+    [InlineData("removal", true)]
+    public async Task Provider_failure_falls_back_with_sanitized_warning(string operation, bool timeout)
     {
-        var failure = new InvalidOperationException("MESSAGE_SENTINEL redis://private-host:6379,password=SECRET_SENTINEL",
-            new Exception("INNER_PROVIDER_SENTINEL"));
+        const string message = "MESSAGE_SENTINEL redis://private-host:6379,password=SECRET_SENTINEL";
+        var inner = new Exception("INNER_PROVIDER_SENTINEL");
+        Exception failure = timeout ? new TimeoutException(message, inner) : new InvalidOperationException(message, inner);
         failure.Data["ProviderDetail"] = "DATA_SENTINEL";
         var logs = new CacheLogger();
         var cache = Adapter(new FakeDistributedCache { Failure = failure }, logs);
         Assert.Null(await Operate(cache, operation));
-        AssertSafeWarning(logs, operation, nameof(InvalidOperationException));
+        AssertSafeWarning(logs, operation, failure.GetType().Name);
     }
 
     [Theory]
@@ -169,8 +160,107 @@ public class RedisCacheTests
             // The production bound is fixed at two seconds; no test-only production setting is added.
             Assert.True(elapsed.Elapsed >= TimeSpan.FromSeconds(1.5));
             AssertSafeWarning(logs, operation, nameof(TimeoutException));
+            var lateValue = Encoding.UTF8.GetBytes("late-provider-value");
+            backing.Value = lateValue;
+            pending.TrySetResult();
+            await backing.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Null(await work);
+            AssertSafeWarning(logs, operation, nameof(TimeoutException));
+            if (operation == "read") Assert.Same(lateValue, backing.Value);
+            else if (operation == "write") Assert.Contains("PAYLOAD_SENTINEL", Encoding.UTF8.GetString(backing.Value!));
+            else Assert.Null(backing.Value);
         }
         finally { pending.TrySetResult(); }
+    }
+
+    [Theory]
+    [InlineData(-1)] [InlineData(0)]
+    public async Task SetAsync_WhenTtlNonpositive_RejectsBeforeProviderIo(int seconds)
+    {
+        var backing = new FakeDistributedCache(); var logs = new CacheLogger();
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => Adapter(backing, logs).SetAsync("KEY_SENTINEL", new object(), TimeSpan.FromSeconds(seconds)));
+        Assert.Empty(backing.Calls); Assert.Empty(logs.Entries);
+    }
+    [Fact]
+    public async Task SetAsync_WhenValueNull_RejectsBeforeProviderIo()
+    {
+        var backing = new FakeDistributedCache(); var logs = new CacheLogger();
+        await Assert.ThrowsAsync<ArgumentNullException>(() => Adapter(backing, logs).SetAsync<object>("KEY_SENTINEL", null!, TimeSpan.FromSeconds(1)));
+        Assert.Empty(backing.Calls); Assert.Empty(logs.Entries);
+    }
+    [Theory]
+    [InlineData("read")] [InlineData("write")] [InlineData("removal")]
+    public async Task Operation_WhenCallerAlreadyCancelled_DoesNotCallProvider(string operation)
+    {
+        var backing = new FakeDistributedCache(); var logs = new CacheLogger();
+        var token = new CancellationToken(true);
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Operate(Adapter(backing, logs), operation, token));
+        Assert.Equal(token, error.CancellationToken);
+        Assert.Empty(backing.Calls); Assert.Empty(logs.Entries);
+    }
+    [Fact]
+    public async Task GetAsync_WhenProviderReturnsNull_MissesWithoutWarning()
+    {
+        var backing = new FakeDistributedCache(); var logs = new CacheLogger();
+        Assert.Null(await Adapter(backing, logs).GetAsync<ItemDto>("KEY_SENTINEL"));
+        Assert.Equal("get", Assert.Single(backing.Calls)); Assert.Empty(logs.Entries);
+    }
+    [Theory]
+    [InlineData("read")] [InlineData("write")] [InlineData("removal")]
+    public async Task Operation_WhenProviderCancelsActiveCaller_FallsBackWithSafeWarning(string operation)
+    {
+        using var caller = new CancellationTokenSource();
+        var backing = new FakeDistributedCache { Failure = new OperationCanceledException("MESSAGE_SENTINEL") };
+        var logs = new CacheLogger();
+        Assert.Null(await Operate(Adapter(backing, logs), operation, caller.Token));
+        Assert.False(caller.IsCancellationRequested);
+        Assert.Single(backing.Calls); Assert.Equal(caller.Token, backing.Token);
+        AssertSafeWarning(logs, operation, nameof(OperationCanceledException));
+    }
+    [Fact]
+    public async Task SetAsync_WhenSerializationFails_WarnsWithoutProviderWrite()
+    {
+        var backing = new FakeDistributedCache(); var logs = new CacheLogger();
+        await Adapter(backing, logs).SetAsync("KEY_SENTINEL", new Unserializable(), TimeSpan.FromSeconds(1));
+        Assert.Empty(backing.Calls);
+        AssertSafeWarning(logs, "write", nameof(InvalidOperationException));
+    }
+    private sealed class Unserializable
+    {
+        public string Secret => throw new InvalidOperationException("MESSAGE_SENTINEL PAYLOAD_SENTINEL SECRET_SENTINEL");
+    }
+    [Theory]
+    [InlineData("id")] [InlineData("itemId")] [InlineData("name")]
+    [InlineData("type")] [InlineData("createdAt")] [InlineData("updatedAt")]
+    [InlineData("invalid-type")]
+    public async Task GetAsync_WhenActionHasOneInvalidMember_ReturnsMissWithSafeWarning(string member)
+    {
+        var backing = new FakeDistributedCache(); var logs = new CacheLogger(); var cache = Adapter(backing, logs);
+        var dto = new ActionDto { Id = Guid.NewGuid(), ItemId = Guid.NewGuid(), Name = "PAYLOAD_SENTINEL", Type = ActionType.Delete, CreatedAt = DateTime.UtcNow.AddDays(-1), UpdatedAt = DateTime.UtcNow };
+        await cache.SetAsync("KEY_SENTINEL", dto, TimeSpan.FromSeconds(1));
+        var valid = backing.Value!;
+        var control = (await cache.GetAsync<ActionDto>("KEY_SENTINEL"))!;
+        Assert.Equal((dto.Id, dto.ItemId, dto.Name, dto.Type, dto.CreatedAt, dto.UpdatedAt), (control.Id, control.ItemId, control.Name, control.Type, control.CreatedAt, control.UpdatedAt));
+        var payload = JsonNode.Parse(valid)!.AsObject();
+        if (member == "invalid-type") payload["type"] = "SECRET_SENTINEL";
+        else Assert.True(payload.Remove(member));
+        backing.Value = Encoding.UTF8.GetBytes(payload.ToJsonString());
+        Assert.Null(await cache.GetAsync<ActionDto>("KEY_SENTINEL"));
+        AssertSafeWarning(logs, "read", nameof(JsonException));
+        backing.Value = valid;
+        Assert.NotNull(await cache.GetAsync<ActionDto>("KEY_SENTINEL"));
+    }
+    [Theory]
+    [InlineData("id")] [InlineData("status")] [InlineData("createdAt")] [InlineData("updatedAt")]
+    public async Task GetAsync_WhenItemRequiredMemberMissing_ReturnsMissWithSafeWarning(string member)
+    {
+        var backing = new FakeDistributedCache(); var logs = new CacheLogger(); var cache = Adapter(backing, logs);
+        await cache.SetAsync("KEY_SENTINEL", new ItemDto(), TimeSpan.FromSeconds(1));
+        Assert.NotNull(await cache.GetAsync<ItemDto>("KEY_SENTINEL"));
+        var payload = JsonNode.Parse(backing.Value!)!.AsObject(); Assert.True(payload.Remove(member));
+        backing.Value = Encoding.UTF8.GetBytes(payload.ToJsonString());
+        Assert.Null(await cache.GetAsync<ItemDto>("KEY_SENTINEL"));
+        AssertSafeWarning(logs, "read", nameof(JsonException));
     }
 
     private static async Task<object?> Operate(RedisCache cache, string operation, CancellationToken token = default)

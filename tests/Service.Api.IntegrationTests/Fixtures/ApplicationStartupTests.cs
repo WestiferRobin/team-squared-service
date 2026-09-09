@@ -38,7 +38,7 @@ public class ApplicationStartupTests
     [InlineData("Cache:KeyPrefix", "   ", "KeyPrefix")]
     public void Invalid_cache_options_fail_actual_host_startup(string key, string value, string member)
     {
-        using var factory = new ApiFactory().WithWebHostBuilder(builder =>
+        using var factory = new ConfigurationApiFactory().WithWebHostBuilder(builder =>
             builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(
                 new Dictionary<string, string?> { [key] = value, ["ConnectionStrings:Redis"] = "" })));
         var failure = Assert.Throws<OptionsValidationException>(() => factory.CreateClient());
@@ -54,7 +54,7 @@ public class ApplicationStartupTests
     public void Missing_Redis_startup_warning_matches_effective_configuration(string? connection, bool expectedWarning)
     {
         using var logs = new RecordingLoggerProvider("Service.Api");
-        using var factory = new ApiFactory().WithWebHostBuilder(builder =>
+        using var factory = new ConfigurationApiFactory().WithWebHostBuilder(builder =>
         {
             builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(
                 new Dictionary<string, string?> { ["ConnectionStrings:Redis"] = connection }));
@@ -64,7 +64,14 @@ public class ApplicationStartupTests
         Assert.Equal(connection, factory.Services.GetRequiredService<IConfiguration>().GetConnectionString("Redis"));
         var warnings = logs.Messages.Where(entry => entry.Category == "Service.Api"
             && entry.Message == "ConnectionStrings:Redis is missing; caching is unavailable and readiness will be degraded.").ToArray();
-        if (expectedWarning) Assert.Equal(LogLevel.Warning, Assert.Single(warnings).Level);
+        if (expectedWarning)
+        {
+            Assert.Equal(LogLevel.Warning, Assert.Single(warnings).Level);
+            var entry = Assert.Single(logs.Entries, log => log.Category == "Service.Api" && log.Level == LogLevel.Warning);
+            Assert.Null(entry.Exception);
+            Assert.Equal("ConnectionStrings:Redis is missing; caching is unavailable and readiness will be degraded.", entry.State["{OriginalFormat}"]);
+            Assert.Single(entry.State);
+        }
         else Assert.Empty(warnings);
     }
 }

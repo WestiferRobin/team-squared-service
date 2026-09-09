@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Opt-in workflow certification only; ordinary runs leave this unset.
+case "${SERVICE_WORKFLOW_CERTIFICATION:-}" in
+  ""|fail|term) ;;
+  *) echo 'SERVICE_WORKFLOW_CERTIFICATION must be unset, fail, or term.' >&2; exit 2 ;;
+esac
 for command in docker dotnet; do
   command -v "$command" >/dev/null || { echo "Required command missing: $command" >&2; exit 1; }
 done
@@ -50,4 +55,10 @@ export ConnectionStrings__Postgres="Host=127.0.0.1;Port=${pg_address##*:};Databa
 export ConnectionStrings__Redis="127.0.0.1:${redis_address##*:},connectTimeout=1000,asyncTimeout=1000,connectRetry=0"
 dotnet tool restore
 dotnet restore
+# Deterministic certification checkpoint after provisioning (default OFF).
+echo "Workflow resources: $project"
+case "${SERVICE_WORKFLOW_CERTIFICATION:-}" in
+  fail) echo 'Certification: controlled command failure (73).' >&2; (exit 73) ;;
+  term) echo 'Certification: delivering SIGTERM at the provisioned checkpoint.' >&2; kill -TERM "$$" ;;
+esac
 dotnet test Service.sln --no-restore

@@ -21,8 +21,10 @@ public class ActionMapperTests
             UpdatedAt = new DateTime(2025, 2, 3, 4, 5, 6, DateTimeKind.Utc),
         };
 
+        var expected = (dto.Id, dto.ItemId, dto.Name, dto.Type, dto.CreatedAt, dto.UpdatedAt);
         var response = ActionMapper.ToResponse(dto);
 
+        Assert.Equal(expected, (dto.Id, dto.ItemId, dto.Name, dto.Type, dto.CreatedAt, dto.UpdatedAt));
         Assert.IsType<ActionResponse>(response);
         Assert.Equal(dto.Id, response.Id);
         Assert.Equal(dto.ItemId, response.ItemId);

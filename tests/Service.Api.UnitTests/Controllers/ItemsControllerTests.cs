@@ -89,6 +89,93 @@ public class ItemsControllerTests
         Assert.Equal(0, items.Calls);
     }
 
+    [Fact]
+    public async Task List_WhenServiceReturnsEmpty_MaterializesEmptyResponseArray()
+    {
+        var service = new RecordingItemService { Results = Array.Empty<ItemDto>() };
+        using var caller = new CancellationTokenSource();
+        var controller = new ItemsController(service, new RecordingActionService());
+        var result = Assert.IsType<OkObjectResult>((await controller.List(caller.Token)).Result);
+        Assert.Empty(Assert.IsType<ItemResponse[]>(result.Value));
+        Assert.Equal(caller.Token, Assert.Single(service.History).Token);
+    }
+    [Theory]
+    [InlineData("List", false)]
+    [InlineData("List", true)]
+    [InlineData("Get", false)]
+    [InlineData("Get", true)]
+    [InlineData("Create", false)]
+    [InlineData("Create", true)]
+    [InlineData("Update", false)]
+    [InlineData("Update", true)]
+    [InlineData("Delete", false)]
+    [InlineData("Delete", true)]
+    public async Task Operation_WhenServiceFails_PropagatesExactFailureAndArguments(string operation, bool cancelled)
+    {
+        using var caller = new CancellationTokenSource();
+        if (cancelled) caller.Cancel();
+        Exception failure = cancelled ? new OperationCanceledException(caller.Token) : new InvalidOperationException("Service failure");
+        var service = new RecordingItemService { Failure = failure };
+        var controller = new ItemsController(service, new RecordingActionService());
+        var id = Guid.NewGuid();
+        var create = new CreateItemRequest { Name = "Create" };
+        var update = new UpdateItemRequest { Name = "Update", Status = ItemStatus.Archived };
+        async Task Run()
+        {
+            switch (operation)
+            {
+                case "List": await controller.List(caller.Token); break;
+                case "Get": await controller.Get(id, caller.Token); break;
+                case "Create": await controller.Create(create, caller.Token); break;
+                case "Update": await controller.Update(id, update, caller.Token); break;
+                case "Delete": await controller.Delete(id, caller.Token); break;
+            }
+        }
+        Assert.Same(failure, await Record.ExceptionAsync(Run));
+        var call = Assert.Single(service.History);
+        Assert.Equal(operation, call.Operation); Assert.Equal(caller.Token, call.Token);
+        if (operation is "Get" or "Update" or "Delete") Assert.Equal(id, call.Id);
+        if (operation == "Create") Assert.Same(create, call.Request);
+        if (operation == "Update") Assert.Same(update, call.Request);
+    }
+
+    [Fact]
+    public async Task ListActions_WhenServiceReturnsEmpty_MaterializesEmptyResponseArray()
+    {
+        using var caller = new CancellationTokenSource(); var id = Guid.NewGuid();
+        var actions = new RecordingActionService { Results = Array.Empty<ActionDto>() };
+        var items = new RecordingItemService();
+        var result = Assert.IsType<OkObjectResult>((await new ItemsController(items, actions).ListActions(id, caller.Token)).Result);
+        Assert.Empty(Assert.IsType<ActionResponse[]>(result.Value));
+        var call = Assert.Single(actions.History); Assert.Equal(id, call.Id); Assert.Equal(caller.Token, call.Token);
+        Assert.Empty(items.History);
+    }
+    [Theory]
+    [InlineData(false, false)] [InlineData(false, true)] [InlineData(true, false)] [InlineData(true, true)]
+    public async Task NestedOperation_WhenServiceFails_PropagatesAndPreservesParentContract(bool create, bool cancelled)
+    {
+        using var caller = new CancellationTokenSource(); if (cancelled) caller.Cancel();
+        Exception failure = cancelled ? new OperationCanceledException(caller.Token) : new InvalidOperationException("Service failure");
+        var actions = new RecordingActionService { Failure = failure }; var items = new RecordingItemService();
+        var controller = new ItemsController(items, actions); var id = Guid.NewGuid();
+        var request = new CreateItemActionRequest { Name = " Nested ", Type = ActionType.Delete };
+        async Task Run()
+        {
+            if (create) await controller.CreateAction(id, request, caller.Token);
+            else await controller.ListActions(id, caller.Token);
+        }
+        Assert.Same(failure, await Record.ExceptionAsync(Run));
+        var call = Assert.Single(actions.History); Assert.Equal(caller.Token, call.Token);
+        Assert.Empty(items.History);
+        if (create)
+        {
+            Assert.Equal("Create", call.Operation);
+            var forwarded = Assert.IsType<CreateActionRequest>(call.Request);
+            Assert.Equal((id, request.Name, request.Type), (forwarded.ItemId, forwarded.Name, forwarded.Type));
+        }
+        else { Assert.Equal("ListByItem", call.Operation); Assert.Equal(id, call.Id); }
+    }
+
     private static void AssertMapped(ItemDto expected, object? value)
     {
         var actual = Assert.IsType<ItemResponse>(value);

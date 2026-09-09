@@ -75,6 +75,9 @@ public class ItemCacheTests(PostgresFixture fixture) : IClassFixture<PostgresFix
             using var ready = await client.GetAsync("/ready");
             Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
             Assert.Equal("Healthy", await ready.Content.ReadAsStringAsync());
+            using var health = await client.GetAsync("/health");
+            Assert.Equal(HttpStatusCode.OK, health.StatusCode);
+            Assert.Equal("Healthy", await health.Content.ReadAsStringAsync());
         }
         finally { await cache.RemoveAsync(key); }
     }
@@ -126,6 +129,7 @@ public class ItemCacheTests(PostgresFixture fixture) : IClassFixture<PostgresFix
         Assert.Equal("Degraded", await ready.Content.ReadAsStringAsync());
         using var health = await client.GetAsync("/health");
         Assert.Equal(HttpStatusCode.OK, health.StatusCode);
+        Assert.Equal("Healthy", await health.Content.ReadAsStringAsync());
         using var deleted = await client.DeleteAsync($"/items/{item.Id}");
         Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
         using var missing = await client.GetAsync($"/items/{item.Id}");

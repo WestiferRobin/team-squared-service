@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Opt-in workflow certification only; ordinary runs leave this unset.
+case "${SERVICE_WORKFLOW_CERTIFICATION:-}" in
+  ""|fail|term) ;;
+  *) echo 'SERVICE_WORKFLOW_CERTIFICATION must be unset, fail, or term.' >&2; exit 2 ;;
+esac
 for command in docker dotnet python3; do
   command -v "$command" >/dev/null || { echo "Required command missing: $command" >&2; exit 1; }
 done
@@ -35,7 +40,9 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM
   if (( status != 0 )); then
+    echo "Dependency logs ($project):" >&2
     "${compose[@]}" logs --no-color --tail 100 >&2 || true
+    echo "API logs ($api_container):" >&2
     docker logs --tail 100 "$api_container" >&2 || true
   fi
   if docker container inspect "$api_container" >/dev/null 2>&1; then
@@ -144,3 +151,10 @@ request('GET', item_path, 404)
 request('GET', action_path, 404)
 print('Docker smoke passed: Healthy liveness/readiness, Swagger JSON/UI, Item/Action CRUD, cache reads and cascade.')
 PY
+
+# Deterministic certification checkpoint after provisioning (default OFF).
+echo "Workflow resources: $project"
+case "${SERVICE_WORKFLOW_CERTIFICATION:-}" in
+  fail) echo 'Certification: controlled command failure (73).' >&2; (exit 73) ;;
+  term) echo 'Certification: delivering SIGTERM at the provisioned checkpoint.' >&2; kill -TERM "$$" ;;
+esac

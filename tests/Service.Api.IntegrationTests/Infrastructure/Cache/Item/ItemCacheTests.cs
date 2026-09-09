@@ -39,7 +39,7 @@ public class ItemCacheTests
         {
             Assert.Null(await cache.GetAsync(dto.Id));
             await cache.SetAsync(dto);
-            var bytes = await backing.GetAsync(key);
+            var bytes = await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2));
             Assert.NotNull(bytes);
             using (var document = JsonDocument.Parse(bytes))
             {
@@ -51,17 +51,17 @@ public class ItemCacheTests
             Assert.Equal((dto.Id, dto.Name, dto.Status, dto.CreatedAt, dto.UpdatedAt),
                 (read.Id, read.Name, read.Status, read.CreatedAt, read.UpdatedAt));
             await cache.RemoveAsync(dto.Id);
-            Assert.Null(await backing.GetAsync(key));
+            Assert.Null(await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2)));
             await backing.SetAsync(key, Encoding.UTF8.GetBytes("{}"));
             Assert.Null(await cache.GetAsync(dto.Id));
             await cache.SetAsync(dto);
             var deadline = DateTime.UtcNow.AddSeconds(5);
-            while (DateTime.UtcNow < deadline && await backing.GetAsync(key) is not null)
+            while (DateTime.UtcNow < deadline && await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2)) is not null)
             {
                 await Task.Delay(100);
             }
             Assert.Null(await cache.GetAsync(dto.Id));
-            Assert.Null(await backing.GetAsync(key));
+            Assert.Null(await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2)));
         }
         finally
         {

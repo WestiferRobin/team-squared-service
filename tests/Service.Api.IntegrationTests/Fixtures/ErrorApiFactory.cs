@@ -25,12 +25,21 @@ public sealed class ErrorApiFactory(string environment) : ApiFactory
 public sealed class ErrorTestController : ControllerBase
 {
     [HttpGet("{kind}")]
-    public IActionResult Get(string kind) => throw (kind switch
+    public IActionResult Get(string kind)
+    {
+        // The exception middleware clears response headers; observe the final response instead.
+        Response.OnStarting(() =>
+        {
+            Response.Headers["X-Test-Request-Id"] = HttpContext.TraceIdentifier;
+            return Task.CompletedTask;
+        });
+        throw (kind switch
     {
         "not-found" => new NotFoundException("The requested resource was not found."),
         "item-not-found" => new ItemNotFoundException(Guid.Parse("11111111-1111-1111-1111-111111111111")),
         "action-not-found" => new ActionNotFoundException(Guid.Parse("22222222-2222-2222-2222-222222222222")),
         "validation" => new RequestValidationException("The request is invalid."),
         _ => new InvalidOperationException("INTERNAL_SECRET_SENTINEL")
-    });
+        });
+    }
 }

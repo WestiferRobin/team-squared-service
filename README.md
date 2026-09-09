@@ -379,6 +379,50 @@ Swagger exposure over HTTP and assert the selected environment.
 It uses no EF InMemory, SQLite or mocked query providers. Missing
 infrastructure configuration fails instead of silently skipping tests.
 
+## Repeatable workflow certification
+
+`test.sh` and `smoke.sh` remain the normal entry points. For the broader LOCAL /
+DEV persistence and script-failure checks, run this opt-in certification separately:
+
+```sh
+python3 scripts/certify-workflows.py
+```
+
+It uses the **actual** `compose.local.yml` and `compose.dev.yml` with unique
+`service-cert-local-*` / `service-cert-dev-*` project names and their documented
+ports. LOCAL runs the host API with the `Service.Api` Development launch profile;
+DEV runs the Compose API in Staging. Certification refuses occupied ports rather
+than stopping existing listeners. Stop your own conflicting workflow first, or
+run certification on an otherwise available development machine.
+
+No developer dotenv file is loaded for LOCAL/DEV certification. The runner supplies
+disposable credentials, isolates child-process configuration, and creates its own
+persistent PostgreSQL volumes. It checks migrations, Swagger, health, Item/Action
+CRUD, real cache population/invalidation, and cascade behavior. Each workflow then
+performs two `down` / recreation cycles **without `-v`**, proving migration and row
+persistence. Final targeted row cleanup is followed by `down -v` against only the
+certification projects, also verifying destructive reset removes those owned
+volumes. Existing LOCAL/DEV volumes are never reset.
+
+While both certification workflows remain running, the runner executes normal
+TEST/smoke validation, two controlled failures per script, and one SIGTERM case per
+script. It verifies exit codes, emitted failure logs, resource removal, and the
+continued presence of the LOCAL/DEV records. Docker inventories and existing
+container start times are compared to detect leaks or interference. Avoid concurrent
+Docker changes while this explicit certification is running.
+
+`SERVICE_WORKFLOW_CERTIFICATION` is a **certification-only**, default-off hook in
+both scripts. `fail` returns status 73; `term` delivers SIGTERM to the script at a
+deterministic provisioned checkpoint and must return 143. The test checkpoint is
+immediately before the test command; the smoke checkpoint follows successful HTTP
+smoke validation, while its API/image/dependencies still exist. This proves the
+SIGTERM trap and cleanup at that checkpoint; it does not claim exhaustive signal
+coverage during every external command or prove cleanup after an uncatchable kill.
+Leave this variable unset for normal use.
+
+Command output is retained under `artifacts/workflows-<run-id>/`. No production
+source, schema, package, or HTTP contract changes are part of certification.
+
 ## OpenAPI and migrations
 
 Swashbuckle.AspNetCore **10.2.3** generates one `Service.Api` v1 document through
@@ -469,7 +513,8 @@ docker/
 └── compose.test.yml
 scripts/
 ├── test.sh
-└── smoke.sh
+├── smoke.sh
+└── certify-workflows.py
 ```
 
 One unchanged multi-stage Dockerfile builds with SDK 8.0.303 and runs

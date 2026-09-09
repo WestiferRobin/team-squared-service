@@ -20,8 +20,10 @@ public class ItemMapperTests
             UpdatedAt = new DateTime(2025, 2, 3, 4, 5, 6, DateTimeKind.Utc),
         };
 
+        var expected = (dto.Id, dto.Name, dto.Status, dto.CreatedAt, dto.UpdatedAt);
         var response = ItemMapper.ToResponse(dto);
 
+        Assert.Equal(expected, (dto.Id, dto.Name, dto.Status, dto.CreatedAt, dto.UpdatedAt));
         Assert.IsType<ItemResponse>(response);
         Assert.Equal(dto.Id, response.Id);
         Assert.Equal(dto.Name, response.Name);

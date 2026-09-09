@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -10,6 +11,12 @@ namespace Service.Api.IntegrationTests.Fixtures;
 
 public sealed class PostgresFixture : IAsyncLifetime
 {
+    private readonly Func<IReadOnlyDictionary<string, string?>, WebApplicationFactory<Program>> createFactory;
+    public PostgresFixture() : this(settings => new ApiFactory().WithWebHostBuilder(builder =>
+        builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(settings)))) { }
+    internal PostgresFixture(Func<IReadOnlyDictionary<string, string?>, WebApplicationFactory<Program>> createFactory)
+        => this.createFactory = createFactory;
+
     private string adminConnection = null!;
     private readonly string databaseName = $"service_test_{Guid.NewGuid():N}";
     private bool created;
@@ -33,16 +40,23 @@ public sealed class PostgresFixture : IAsyncLifetime
             created = true;
             settings.Database = databaseName;
             var testConnection = settings.ConnectionString;
-            Factory = new ApiFactory().WithWebHostBuilder(builder =>
-                builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(
-                    new Dictionary<string, string?> { ["ConnectionStrings:Postgres"] = testConnection, ["ConnectionStrings:Redis"] = "", ["Cache:KeyPrefix"] = CachePrefix })));
+            Factory = createFactory(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Postgres"] = testConnection,
+                ["ConnectionStrings:Redis"] = "",
+                ["Cache:KeyPrefix"] = CachePrefix
+            });
             using var scope = Factory.Services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<ServiceDbContext>();
             await db.Database.MigrateAsync();
         }
-        catch
+        catch (Exception initializationError)
         {
-            await DisposeAsync();
+            try { await DisposeAsync(); }
+            catch (Exception cleanupError)
+            {
+                throw new AggregateException("Fixture initialization and cleanup failed.", initializationError, cleanupError);
+            }
             throw;
         }
     }
@@ -54,9 +68,27 @@ public sealed class PostgresFixture : IAsyncLifetime
         await db.Items.ExecuteDeleteAsync();
     }
 
-    public async Task DisposeAsync()
+    public Task DisposeAsync() => CleanupAsync(
+        async () => { if (Factory is not null) await Factory.DisposeAsync(); }, DropOwnedDatabaseAsync);
+
+    // Keep both failures when necessary, and never let host disposal skip database cleanup.
+    internal static async Task CleanupAsync(Func<Task> disposeHost, Func<Task> dropDatabase)
     {
-        if (Factory is not null) await Factory.DisposeAsync();
+        Exception? hostError = null;
+        try { await disposeHost(); }
+        catch (Exception error) { hostError = error; }
+        try { await dropDatabase(); }
+        catch (Exception databaseError)
+        {
+            if (hostError is not null)
+                throw new AggregateException("Host disposal and owned database cleanup failed.", hostError, databaseError);
+            throw;
+        }
+        if (hostError is not null) ExceptionDispatchInfo.Capture(hostError).Throw();
+    }
+
+    private async Task DropOwnedDatabaseAsync()
+    {
         if (!created) return;
         await using var admin = new NpgsqlConnection(adminConnection);
         await admin.OpenAsync();

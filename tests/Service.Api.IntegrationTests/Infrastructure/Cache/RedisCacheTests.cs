@@ -34,19 +34,19 @@ public class RedisCacheTests
         try
         {
             Assert.Null(await cache.GetAsync<ItemDto>(key));
-            Assert.Null(await backing.GetAsync(key));
+            Assert.Null(await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2)));
             await cache.SetAsync(key, dto, TimeSpan.FromSeconds(30));
             AssertItemValues(dto, await cache.GetAsync<ItemDto>(key));
             await cache.RemoveAsync(key);
             Assert.Null(await cache.GetAsync<ItemDto>(key));
-            Assert.Null(await backing.GetAsync(key));
+            Assert.Null(await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2)));
             await cache.SetAsync(key, dto, TimeSpan.FromSeconds(1));
             Assert.NotNull(await cache.GetAsync<ItemDto>(key));
             var deadline = DateTime.UtcNow.AddSeconds(5);
-            while (DateTime.UtcNow < deadline && await backing.GetAsync(key) is not null)
+            while (DateTime.UtcNow < deadline && await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2)) is not null)
                 await Task.Delay(100);
             Assert.Null(await cache.GetAsync<ItemDto>(key));
-            Assert.Null(await backing.GetAsync(key));
+            Assert.Null(await backing.GetAsync(key).WaitAsync(TimeSpan.FromSeconds(2)));
         }
         finally { await cache.RemoveAsync(key); }
     }
