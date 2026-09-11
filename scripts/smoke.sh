@@ -6,7 +6,7 @@ case "${SERVICE_WORKFLOW_CERTIFICATION:-}" in
   ""|fail|term) ;;
   *) echo 'SERVICE_WORKFLOW_CERTIFICATION must be unset, fail, or term.' >&2; exit 2 ;;
 esac
-for command in docker dotnet python3; do
+for command in docker python3; do
   command -v "$command" >/dev/null || { echo "Required command missing: $command" >&2; exit 1; }
 done
 
@@ -35,6 +35,8 @@ unset DOTNET_ENVIRONMENT OpenApi__Enabled
 project="service-smoke-$(date +%s)-$$-$RANDOM"
 api_container="${project}-api"
 image="service-api:${project}"
+tool_image="${project}-tooling"
+tool_container="${project}-tooling"
 compose=(docker compose --env-file /dev/null -p "$project" -f docker/compose.test.yml)
 cleanup() {
   local status=$?
@@ -44,6 +46,10 @@ cleanup() {
     "${compose[@]}" logs --no-color --tail 100 >&2 || true
     echo "API logs ($api_container):" >&2
     docker logs --tail 100 "$api_container" >&2 || true
+  fi
+  docker rm -f "$tool_container" >/dev/null 2>&1 || true
+  if docker image inspect "$tool_image" >/dev/null 2>&1; then
+    docker image rm "$tool_image" >/dev/null || { if (( status == 0 )); then status=1; fi; }
   fi
   if docker container inspect "$api_container" >/dev/null 2>&1; then
     docker rm -f "$api_container" >/dev/null || { if (( status == 0 )); then status=1; fi; }
@@ -62,13 +68,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 "${compose[@]}" config --quiet
 "${compose[@]}" up -d --wait --wait-timeout 60
-pg_address=$("${compose[@]}" port postgres 5432)
-redis_address=$("${compose[@]}" port redis 6379)
-export ConnectionStrings__Postgres="Host=127.0.0.1;Port=${pg_address##*:};Database=service_test;Username=$POSTGRES_USER;Password=$POSTGRES_PASSWORD"
-export ConnectionStrings__Redis="127.0.0.1:${redis_address##*:},connectTimeout=1000,asyncTimeout=1000,connectRetry=0"
-dotnet tool restore
-dotnet restore
-dotnet ef database update --project src/Service.Api
+export ConnectionStrings__Postgres="Host=postgres;Port=5432;Database=service_test;Username=$POSTGRES_USER;Password=$POSTGRES_PASSWORD"
+export ConnectionStrings__Redis="redis:6379,connectTimeout=1000,asyncTimeout=1000,connectRetry=0"
+docker build --target tooling -t "$tool_image" .
+docker run --rm --name "$tool_container" --network "${project}_default" \
+  -e ConnectionStrings__Postgres -e ASPNETCORE_ENVIRONMENT=Testing \
+  "$tool_image" dotnet ef database update --project src/Service.Api
 # The same root Dockerfile serves DEV and this disposable image certification.
 docker build -t "$image" .
 export ConnectionStrings__Postgres="Host=postgres;Port=5432;Database=service_test;Username=$POSTGRES_USER;Password=$POSTGRES_PASSWORD"

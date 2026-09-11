@@ -1,6 +1,29 @@
 name: service-local
 
 services:
+  service-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: development
+    init: true
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      OpenApi__Enabled: "true"
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-service_local};Username=${POSTGRES_USER:-service};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the explicit env file}"
+      ConnectionStrings__Redis: "redis:6379,connectTimeout=1000,asyncTimeout=1000,connectRetry=0"
+      Cache__KeyPrefix: service-local
+    ports:
+      - "127.0.0.1:${API_PORT:-5080}:8080"
+    volumes:
+      - ../src:/source/src:ro
+      - api-artifacts:/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -34,3 +57,4 @@ services:
 
 volumes:
   postgres-data:
+  api-artifacts:

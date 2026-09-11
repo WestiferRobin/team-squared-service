@@ -5,6 +5,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: runtime
     environment:
       ASPNETCORE_ENVIRONMENT: Staging
       OpenApi__Enabled: "true"

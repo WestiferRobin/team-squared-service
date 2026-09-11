@@ -134,28 +134,53 @@ out of production registration and choose the smallest helper that proves the be
 ## Commands
 
 All commands run from the repository root in the [supported shell/setup](DEVELOPMENT.md#shell-and-working-directory).
-Use SDK 8.0.303. Ordinary unit/hosted tests need the SDK and package restore; provider
-runs also need Docker/Compose or independently provisioned dedicated TEST providers.
-Smoke/certification additionally need Python 3. Leave `SERVICE_WORKFLOW_CERTIFICATION`
-unset for normal runs.
+Normal Make tests require Docker/Compose and Make, not host .NET. SDK 8.0.303 and
+pinned EF tooling run inside the Dockerfile tooling image. Smoke/certification
+additionally need host Python 3. Leave SERVICE_WORKFLOW_CERTIFICATION unset normally.
 
-| Purpose | Command | What it proves |
+| Purpose | Preferred command | Raw mechanism / evidence |
 | --- | --- | --- |
-| Fast unit feedback | `dotnet test tests/Service.Api.UnitTests` | Isolated behavior; no running infrastructure |
-| Hosted feedback without PostgreSQL/Redis cases | `dotnet test Service.sln --filter "Category!=Postgres&Category!=Redis"` | Unit plus provider-independent hosted/configuration behavior |
-| Integration project, with prerequisites below | `dotnet test tests/Service.Api.IntegrationTests` | Hosted HTTP/configuration plus real provider boundaries; does not provision them |
-| Full automated suite | `./scripts/test.sh` | Restores, provisions isolated TEST PostgreSQL/Redis, runs the solution and cleans up |
-| Actual image smoke | `./scripts/smoke.sh` | Builds/runs the root Dockerfile image in Staging; real HTTP CRUD/cache/cascade, health and Swagger, with owned resource cleanup |
-| LOCAL/DEV workflow certification | `python3 scripts/certify-workflows.py` | Actual LOCAL and DEV topologies, persistence through recreation, isolation, script failure/interruption status/logging and cleanup |
+| Fast unit feedback | `make unit` | `dotnet test tests/Service.Api.UnitTests/Service.Api.UnitTests.csproj` in a network-disabled SDK container; isolated behavior, no providers |
+| Integration only | `make integration` | `./scripts/test.sh integration`; provisions real TEST PostgreSQL/Redis, runs only integration csproj, cleans up |
+| Full automated suite | `make test` | `./scripts/test.sh`; provisions TEST, runs unit + integration solution, cleans up |
+| Actual image smoke | `./scripts/smoke.sh` | `./scripts/smoke.sh`; explicit migrations, root Dockerfile build, Staging image, Healthy liveness/readiness, Swagger UI/JSON, Item/Action CRUD/cache reads/cascade, cleanup |
+| LOCAL/DEV workflow certification | `python3 scripts/certify-workflows.py` | `python3 scripts/certify-workflows.py`; actual topologies, persistence, isolation, failure/interruption and cleanup |
+| Hosted tests without providers | Direct dotnet command | `dotnet test Service.sln --filter "Category!=Postgres&Category!=Redis"` |
+
+The first three rows are the normal public Make test interface; smoke/certification are advanced scripts. Normal inner-loop logic work
+uses unit tests; provider/HTTP changes use integration; full regression uses test.
+Image/startup changes warrant smoke. Workflow/environment changes or template-level
+certification warrant certify; it is not required for every edit.
 
 Use `--filter FullyQualifiedName~YourTestName` with a `dotnet test` project command
 for a focused regression. Filters do not supply missing infrastructure. The scripts
-are the normal full-suite/image entry points; do not assume they forward arbitrary
-`dotnet test` arguments.
+are the normal full-suite/image entry points; `test.sh` accepts only optional `all` (default), `unit`, or `integration`,
+not arbitrary `dotnet test` arguments.
 
-### Direct integration prerequisites
+### TEST credentials and cleanup
 
-Prefer `./scripts/test.sh` for provision/run/cleanup in one command. For direct
+`.env.test` is **optional** for `make integration`, `make test` and `./scripts/smoke.sh`.
+No manual TEST Compose startup is needed. The scripts use disposable credentials
+`service` / `change_me_test_only` when absent. If customization is needed, copy
+`.env.example` to `.env.test`; only POSTGRES_USER and POSTGRES_PASSWORD are read,
+using unquoted letters/digits/underscore/dot/dash. The scripts do not execute it.
+The file is ignored by Git/Docker and is not created by `make setup`.
+
+All test modes share `scripts/test.sh` provisioning and cleanup: database
+`service_test`, unique Compose project, ephemeral loopback ports and container-network connections. Unit does not provision providers. Integration-only selects the integration csproj; the default
+runs Service.sln. Test fixtures create/migrate/drop generated case databases;
+Redis cases use targeted keys. No LOCAL/DEV connections are reused.
+
+Exit 0 means the selected run and cleanup succeeded. Failures stay nonzero; cleanup
+failure also makes a successful run fail. EXIT/INT/TERM traps clean owned resources;
+nonzero runs emit bounded logs. Each run removes its SDK container/image tag; smoke also removes its own API container/image. Docker build caches may remain.
+An uncatchable kill or Docker daemon failure can prevent cleanup: recover only the
+reported owned project, never delete unrelated LOCAL/DEV resources.
+
+### Direct integration prerequisites (optional host SDK / IDE)
+
+Prefer `make integration` (integration only) or `make test` (full solution) for
+provision/run/cleanup in one command. For direct
 integration execution or IDE debugging, provision **dedicated TEST** PostgreSQL
 and Redis first, then export `ConnectionStrings__Postgres` (base database exactly
 `service_test`, user able to create databases) and `ConnectionStrings__Redis` into
@@ -165,7 +190,7 @@ provider tests explicitly consume these connections through their fixtures/helpe
 
 The following optional Bash subshell gives a focused run its own TEST project and
 ephemeral ports, without changing your parent shell's environment. It needs Docker
-Compose v2 and uses disposable example credentials; stop on any provisioning failure.
+Compose v2 or newer and uses disposable example credentials; stop on any provisioning failure.
 For an IDE session, arrange equivalent dedicated resources and exports for the IDE,
 retain them while debugging and clean only that session's project afterward.
 

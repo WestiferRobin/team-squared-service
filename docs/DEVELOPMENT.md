@@ -1,422 +1,251 @@
 # Development and operation
 
-[Start here: README](../README.md) · [Architecture and request walkthroughs](ARCHITECTURE.md) · [Testing](TESTING.md)
-
-For new and experienced contributors: use this guide to run, inspect, stop and safely change the service. Start with
-[LOCAL](#local); use [DEV](#dev) for a containerized background service. See
-[configuration](#configuration-sources), [debugging](#debugging) or
-[troubleshooting](#troubleshooting) when behavior differs from expectations.
-For contributions, jump to [where changes go](#where-changes-go),
-[add Widget](#add-a-domain-widget), [migrations](#do-i-need-a-migration),
-[contract review](#contract-change-checklist), [first contribution](#beginner-contribution-path),
-or the [verification checklist](#contributor-checklist). Test design and helper selection
-are in the [testing guide](TESTING.md).
+[README](../README.md) · [Architecture](ARCHITECTURE.md) · [Testing](TESTING.md)
 
 ## Shell and working directory
 
-All commands run from the repository root, even though this file lives in `docs/`.
-Examples use Bash-compatible syntax on macOS/Linux; `export`, `set -a`, `. file`
-and the shell scripts are not native PowerShell commands. The workflow runner also
-uses POSIX process groups/signals. Do not assume an unverified Windows shell setup
-is interchangeable with this workflow.
+Run commands at the repository root. Normal workflows require Git, Docker with
+Compose v2+, GNU Make 3.81+, and Bash on macOS/Linux. Docker must be running.
+Host .NET is optional; host Python 3 is needed only by advanced verification.
+Native PowerShell and BSD Make are not the supported interface.
 
-Use SDK 8.0.303 as pinned in [global.json](../global.json); roll-forward is disabled.
-Docker Engine/Desktop must be running with Compose v2. Git is needed to clone;
-Bash runs the shell scripts; Python 3 runs smoke/workflow validation. The optional
-HTTP command examples use host `curl`; Swagger can be used instead.
+## Normal Make workflow
+
+```bash
+make setup
+make migrate
+make run
+make logs
+make stop
+```
+
+ENV defaults to local for build/run/migrate/stop/logs. Unsupported values fail.
+Setup verifies tools and creates only missing `.env.local`/`.env.dev`; it never
+starts services or overwrites existing configuration. Docker image builds perform
+SDK tool/package restore. Run does not migrate; first use and schema changes need
+an explicit migration command.
+
+| Command | Behavior |
+| --- | --- |
+| `make build ENV=local` | Build Dockerfile development target; no service startup |
+| `make build ENV=dev` | Build Dockerfile runtime target; no service startup |
+| `make run ENV=local\|dev` | Build/start selected API and dependencies; wait for Healthy readiness |
+| `make migrate ENV=local\|dev` | Start selected PostgreSQL; SDK container applies existing EF migrations |
+| `make stop ENV=local\|dev` | Compose down for selected project, preserving volumes |
+| `make logs ENV=local\|dev` | Follow API logs; `LOGS_ALL=1` includes dependencies |
+| `make unit` | Unit project in SDK container, no provider containers |
+| `make integration` | Integration project with isolated real TEST providers |
+| `make test` | Full solution with isolated real TEST providers |
+
+The public Make targets are exactly help/setup/build/run/stop/logs/migrate/unit/
+integration/test. Advanced scripts are intentionally separate.
 
 ## LOCAL
 
-```text
-Host API: Development, 127.0.0.1:5080
-    → PostgreSQL: 127.0.0.1:55432, database service_local
-    → Redis: 127.0.0.1:56379, cache prefix service-local
-```
+LOCAL is fully containerized: API in Development, PostgreSQL and Redis.
+Default loopback bindings: API 5080, PostgreSQL 55432, Redis 56379. Database
+`service_local`, cache prefix `service-local`, Compose project `service-local`.
 
-[compose.local.yml](../docker/compose.local.yml) starts only PostgreSQL and Redis.
-The API runs under your IDE, `dotnet run`, or `dotnet watch`. PostgreSQL has a named
-persistent volume; Redis storage is disposable.
+The Dockerfile `development` target inherits the pinned SDK/tooling stage and
+runs `dotnet watch --non-interactive --project src/Service.Api run --no-launch-profile`.
+`src/` is mounted read-only; .NET artifacts output goes to a separate named volume
+at `/artifacts`. No nested mounts or pre-existing host bin/obj directories are needed.
+Polling file watching supports Docker Desktop; unsupported hot edits restart the
+application. NuGet packages are restored into the image and reused through build
+cache. Editing source does not write Linux build output into the host checkout.
+Changes to Dockerfile, tool manifests, or dependency declarations warrant `make run`
+to rebuild/recreate the container. No automatic IDE attachment is provided.
 
-The canonical first-start commands—configuration, dependency startup, migration
-and host API—are in the [README Quick Start](../README.md#quick-start). Reuse that
-sequence whenever opening a fresh API terminal; environment exports do not carry
-into another terminal automatically.
-
-| Operation | Command / source |
-| --- | --- |
-| Start dependencies after setup | `docker compose --env-file .env.local -f docker/compose.local.yml up -d --wait --wait-timeout 60` |
-| Apply existing migrations, with LOCAL exports loaded | `dotnet ef database update --project src/Service.Api` |
-| Run host API | `dotnet run --project src/Service.Api --launch-profile Service.Api` |
-| Watch source changes instead | `dotnet watch --project src/Service.Api run` |
-| Inspect dependencies | `docker compose --env-file .env.local -f docker/compose.local.yml ps` |
-| Follow dependency logs | `docker compose --env-file .env.local -f docker/compose.local.yml logs -f postgres redis` |
-
-The [launch profile](../src/Service.Api/Properties/launchSettings.json) selects
-Development and port 5080. For IDE debugging, select `Service.Api` and supply the
-same LOCAL connections and cache prefix through the IDE's external environment,
-or launch the IDE from the configured shell. Launch settings contain no secrets.
-The host API logs appear in its terminal or IDE output pane.
-
-Stop the host API with Ctrl-C before stopping dependencies:
-
-```bash
-docker compose --env-file .env.local -f docker/compose.local.yml down
-```
-
-Normal `down` removes containers/network but preserves the PostgreSQL volume.
-Recreating the same project brings existing data back. This is intentional.
-
-> **Destructive LOCAL reset:** the following removes this project's PostgreSQL
-> volume and all its data. Use it only when you intentionally want an empty database.
-> Reapply existing migrations after recreating dependencies. It is not a normal repair step.
-
-```bash
-docker compose --env-file .env.local -f docker/compose.local.yml down -v
-```
+Normal stop preserves both PostgreSQL data and development build volumes. Use the
+same project name when restarting. Ctrl-C during logs only stops the log follower.
 
 ## DEV
 
-Topology: `127.0.0.1:18080` → `service-api:8080` → `postgres:5432` / `redis:6379`.
-Compose project `service-dev` uses Staging, database `service_dev`, and cache prefix
-`service-dev`. PostgreSQL persists in a project-owned named volume; Redis is
-recreated without persistence. Host dependency ports `25432` / `26379` are bound
-only to loopback and support explicit host-side EF migrations.
+DEV builds the checked-out API source into the unchanged published runtime stage.
+It runs as the image's non-root APP_UID, listens on container port 8080, has no
+source mount, and uses Staging with `OpenApi__Enabled=true`.
+Default loopback bindings: API 18080, PostgreSQL 25432, Redis 26379. Database
+`service_dev`, cache prefix `service-dev`, Compose project `service-dev`.
 
 ```bash
-[ -f .env.dev ] || cp .env.example .env.dev
-docker compose --env-file .env.dev -f docker/compose.dev.yml config --quiet
-docker compose --env-file .env.dev -f docker/compose.dev.yml up -d --wait --wait-timeout 60 postgres redis
-
-# In a fresh shell, configure the host-side migration connection.
-set -a
-. ./.env.dev
-set +a
-unset DOTNET_ENVIRONMENT
-export ASPNETCORE_ENVIRONMENT=Staging
-export ConnectionStrings__Postgres="Host=127.0.0.1;Port=${POSTGRES_PORT:-25432};Database=${POSTGRES_DB:-service_dev};Username=${POSTGRES_USER:-service};Password=${POSTGRES_PASSWORD}"
-dotnet ef database update --project src/Service.Api
-
-docker compose --env-file .env.dev -f docker/compose.dev.yml up -d --build service-api
-curl --fail http://127.0.0.1:18080/health
-curl --fail http://127.0.0.1:18080/ready
-docker compose --env-file .env.dev -f docker/compose.dev.yml logs -f service-api
+make build ENV=dev
+make migrate ENV=dev
+make run ENV=dev
+make logs ENV=dev
+make stop ENV=dev
 ```
 
-Dependency health checks establish server availability; they do not apply EF
-migrations. API startup never migrates or seeds. Readiness must report `Healthy`
-for full validation; HTTP 200 with `Degraded` means Redis is unavailable. Allow a
-short startup period before checking the HTTP endpoints.
-
-Swagger UI: <http://127.0.0.1:18080/swagger>.
-JSON: <http://127.0.0.1:18080/swagger/v1/swagger.json>.
-Set `API_PORT`, `POSTGRES_PORT`, or `REDIS_PORT` in `.env.dev` to change host ports,
-and use those ports in URLs/migration connections. Container connections always
-use Compose DNS, not localhost.
-
-```bash
-# Rebuild/recreate just the API, retaining running dependencies and their data.
-docker compose --env-file .env.dev -f docker/compose.dev.yml up -d --build --no-deps service-api
-# Stop while preserving PostgreSQL.
-docker compose --env-file .env.dev -f docker/compose.dev.yml down
-```
-
-DEV can run background dependencies while another service is debugged locally.
-Copies of the service should choose unique project names (`-p`) and host ports.
-Each project has its own network and volumes, without a shared global network.
-
-> **Destructive DEV reset:** only run this when you intend to delete this DEV
-> project's persisted database. Stop ordinary work first; existing rows will be lost.
-
-```bash
-docker compose --env-file .env.dev -f docker/compose.dev.yml down -v
-```
-
-DEV is the mock-production/background topology: debug Service A locally while
-Services B/C run as DEV containers. It uses the actual Compose API service, not a
-host API connected to DEV dependencies. Ctrl-C on `logs -f` stops log following;
-containers continue running until stopped with Compose.
-
-## TEST overview
-
-Unit tests require no running infrastructure:
-
-```bash
-dotnet test tests/Service.Api.UnitTests
-# Optional: all tests that do not require PostgreSQL or Redis.
-dotnet test Service.sln --filter "Category!=Postgres&Category!=Redis"
-```
-
-Run the full solution and certify the actual Docker image separately:
-
-```bash
-[ -f .env.test ] || cp .env.example .env.test
-./scripts/test.sh
-./scripts/smoke.sh
-```
-
-Both scripts accept only `POSTGRES_USER` and `POSTGRES_PASSWORD` from `.env.test`,
-using disposable template defaults when absent. Values must be unquoted letters,
-digits, underscores, dots or dashes. Other dotenv settings and inherited connection
-strings cannot redirect tests: scripts force database `service_test`, host loopback
-connections, cache prefix `service-test`, unique project names, and ephemeral host
-ports assigned by Docker. Scripts do not execute the dotenv file as shell code.
-
-`test.sh` restores tools/packages, provisions only PostgreSQL and Redis from
-`compose.test.yml`, waits for health, and runs the full solution. Integration tests
-use WebApplicationFactory with real dependencies. Each PostgreSQL fixture creates,
-migrates and deletes its own unique database; Redis tests use unique keys/prefixes
-and never flush shared state. Ordinary test hosts explicitly disable OpenAPI.
-
-`smoke.sh` provisions a different disposable TEST project, explicitly applies EF
-migrations, builds the root Dockerfile, and runs the image with Staging, container
-DNS connections and OpenAPI enabled. Host-side Python polls for `200 Healthy` with
-a 60-second deadline, checks liveness/readiness and Swagger JSON/UI, and exercises
-Item/Action creation, canonical reads, updates, lists, cache reads and cascade
-not-found behavior. No curl or SDK is required inside the API image.
-
-Both scripts preserve failure status, collect bounded logs on failure, and clean
-up their own containers, network and volumes on exit, Ctrl-C or termination. Smoke
-also removes its unique image tag. They cannot remove LOCAL/DEV projects or data.
-An uncatchable kill or Docker daemon failure can prevent cleanup; the reported
-unique project name identifies resources for manual recovery. No fixed global
-container names are used. Existing test stacks are not reused or removed.
-
-`compose.test.yml` remains dependency-only with temporary PostgreSQL/Redis storage.
-For manual inspection its defaults are project `service-test`, database
-`service_test`, ports `15432` / `16379`; automated scripts override project/ports.
-
-```bash
-docker compose --env-file .env.test -f docker/compose.test.yml config --quiet
-```
-
-Unit tests exercise isolated behavior; hosted integration tests exercise ASP.NET
-Core and real PostgreSQL/Redis boundaries where needed. Running the whole solution
-directly with `dotnet test` does not provision infrastructure. Prefer `test.sh` for
-that job; it supplies dedicated TEST connections and performs cleanup.
-
-Ordinary integration hosts deliberately isolate application configuration and
-disable Swagger. Dedicated configuration hosts load application JSON defaults with
-intentional overrides. Do not expect a developer shell setting to reconfigure an
-ordinary test host. See [test placement](TESTING.md#test-placement) and
-[helper selection](TESTING.md#test-helpers) before writing a test.
-
-## Workflow certification
-
-`test.sh` and `smoke.sh` remain the normal entry points. For the broader LOCAL /
-DEV persistence and script-failure checks, run this opt-in certification separately:
-
-```sh
-python3 scripts/certify-workflows.py
-```
-
-It uses the **actual** `compose.local.yml` and `compose.dev.yml` with unique
-`service-cert-local-*` / `service-cert-dev-*` project names and their documented
-ports. LOCAL runs the host API with the `Service.Api` Development launch profile;
-DEV runs the Compose API in Staging. Certification refuses occupied ports rather
-than stopping existing listeners. Stop your own conflicting workflow first, or
-run certification on an otherwise available development machine.
-
-No developer dotenv file is loaded for LOCAL/DEV certification. The runner supplies
-disposable credentials, isolates child-process configuration, and creates its own
-persistent PostgreSQL volumes. It checks migrations, Swagger, health, Item/Action
-CRUD, real cache population/invalidation, and cascade behavior. Each workflow then
-performs two `down` / recreation cycles **without `-v`**, proving migration and row
-persistence. Final targeted row cleanup is followed by `down -v` against only the
-certification projects, also verifying destructive reset removes those owned
-volumes. Existing LOCAL/DEV volumes are never reset.
-
-While both certification workflows remain running, the runner executes normal
-TEST/smoke validation, two controlled failures per script, and one SIGTERM case per
-script. It verifies exit codes, emitted failure logs, resource removal, and the
-continued presence of the LOCAL/DEV records. Docker inventories and existing
-container start times are compared to detect leaks or interference. Avoid concurrent
-Docker changes while this explicit certification is running.
-
-`SERVICE_WORKFLOW_CERTIFICATION` is a **certification-only**, default-off hook in
-both scripts. `fail` returns status 73; `term` delivers SIGTERM to the script at a
-deterministic provisioned checkpoint and must return 143. The test checkpoint is
-immediately before the test command; the smoke checkpoint follows successful HTTP
-smoke validation, while its API/image/dependencies still exist. This proves the
-SIGTERM trap and cleanup at that checkpoint; it does not claim exhaustive signal
-coverage during every external command or prove cleanup after an uncatchable kill.
-Leave this variable unset for normal use.
-
-Command output is retained under `artifacts/workflows-<run-id>/`. No production
-source, schema, package, or HTTP contract changes are part of certification.
+Both modes run locally. DEV is a built-image integration topology, not production
+deployment. No source reload is promised in DEV; rerun `make run ENV=dev` to rebuild.
 
 ## Configuration sources
 
-| Source | Role |
-| --- | --- |
-| [appsettings.json](../src/Service.Api/appsettings.json) | Safe base defaults; empty infrastructure connections; Swagger disabled |
-| [appsettings.Development.json](../src/Service.Api/appsettings.Development.json) | Development logging overrides and Swagger enabled |
-| [.env.example](../.env.example) | Disposable credential example copied into separate workflow files |
-| Environment variables | Supply application connections, cache prefix and optional overrides |
-| [launchSettings.json](../src/Service.Api/Properties/launchSettings.json) | Local launch environment and listener; not container configuration |
-| Test factories | Build deliberately isolated hosts and explicit test overrides |
+The helper parses `.env.local` or `.env.dev` as data, never executes it. Supported
+keys: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, POSTGRES_PORT, REDIS_PORT,
+API_PORT. Values are nonempty unquoted letters/digits/underscore/dot/dash; ports
+must be 1–65535. Password is required. Defaults come from the selected topology.
+Selected file/defaults override inherited shell values to prevent accidental
+cross-environment connections. Files are ignored by Git and Docker build context.
 
-For normal application settings, environment-specific JSON overrides base JSON;
-matching environment variables override JSON; command-line configuration can
-explicitly override application settings. Use `__` for nesting, such as
-`Cache__KeyPrefix` for `Cache:KeyPrefix`. The launch profile supplies settings to the
-host process; the documented commands unset conflicting environment selectors.
-Use a fresh shell for each workflow instead of mixing LOCAL and DEV exports.
+Keep database names distinct. Compose project-scoped networks and volumes isolate
+LOCAL/DEV even when logical container hostnames are both postgres/redis.
+`API_PORT` is the published host port; the API always listens on container 8080.
 
-**Compose interpolation is separate.** `--env-file .env.local` supplies values for
-`${...}` substitutions in Compose. Already-exported shell variables can override
-those file values during interpolation. This does not automatically pass every
-variable into the API container; DEV explicitly lists its container environment.
-
-.NET does not load arbitrary dotenv files. The LOCAL examples explicitly source a
-trusted file and export application connection strings. TEST scripts parse only
-their documented credential keys. The certification runner supplies its own
-LOCAL/DEV credentials and child-process configuration.
-
-> **Credentials:** .env.example values are disposable examples, not production
-> secrets. Real developer `.env*` files are ignored by Git and Docker. Never commit
-> real credentials or put them in launch settings. Source only trusted shell-compatible files.
-
-| Key/environment variable | Purpose |
-| --- | --- |
-| `ConnectionStrings__Postgres` | Required PostgreSQL connection; empty appsettings default |
-| `ConnectionStrings__Redis` | Optional Redis connection; empty default |
-| `Cache__DefaultTtlSeconds` | Default 300; valid 1–86400 |
-| `Cache__KeyPrefix` | Default `service`; nonblank |
-| `Logging__LogLevel__...` | Built-in logging configuration |
-| `AllowedHosts` | Default `*`; set deployment hostnames when deploying |
-| `OpenApi__Enabled` | Gate Swagger JSON and UI together; base false |
-| `ASPNETCORE_ENVIRONMENT` | Select environment settings; do not also set conflicting DOTNET_ENVIRONMENT |
-| `ASPNETCORE_HTTP_PORTS` | Container defaults to 8080 |
-| `ASPNETCORE_URLS` / `--urls` | Explicit listener override |
-| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Compose database configuration |
-| `POSTGRES_PORT`, `REDIS_PORT`, `API_PORT` | Compose loopback port bindings (API_PORT applies to DEV) |
-
-Appsettings contains no credentials. Invalid cache options fail startup. No extra
-services, provider configuration or background processing are required.
+`PROJECT=service-local-name` or `PROJECT=service-dev-name` selects another owned
+standalone project. Reuse that value for every lifecycle command, choose unused
+ports in the selected env file, and never target another user's resources.
+The helper rejects unrelated project names. A project name does not resolve port
+collisions by itself. Future parent composition owns its own project identity.
 
 ## Applying existing migrations
 
-A migration records schema changes so a database can be brought to the version
-expected by this source. Starting PostgreSQL creates a database, not the API's
-Items/Actions schema. API startup never applies migrations or seeds data.
-
-With the correct LOCAL or DEV host connection exported, run:
-
-```bash
-dotnet tool restore
-dotnet ef database update --project src/Service.Api
-```
-
-The local EF tool version is pinned in [.config/dotnet-tools.json](../.config/dotnet-tools.json).
-A successful command applies pending migrations or reports the database is already
-current. `/ready` then verifies connectivity, migration state and access to Items
-and Actions. Redis failure can still make readiness Degraded after a successful
-migration. Check its response body, not only the HTTP status.
-
-Use the DEV host-mapped PostgreSQL port for host-side EF commands; the DEV API
-itself connects through `postgres:5432`. For intentional schema changes, follow
-[creating and reviewing migrations](#creating-and-reviewing-migrations).
+`make migrate ENV=local|dev` starts/waits for PostgreSQL only, builds the SDK tooling
+image, and runs EF on the selected Compose network using internal postgres:5432.
+It applies existing migrations; it never creates migrations. Failure propagates
+through Docker/script as nonzero (GNU Make reports its normal recipe failure).
+No host connection-string exports or host SDK are needed.
 
 ## Swagger and health
 
-OpenAPI JSON describes the API; Swagger UI is the interactive browser that reads
-that document and lets you send requests. This service uses Swashbuckle to generate
-its `v1` document through AddApi. Health endpoints are outside the Swagger document.
-Swagger describes success contracts; the complete error policy is in the
-[HTTP contract](ARCHITECTURE.md#http-contract).
-
-| Workflow | UI | JSON | Gate |
-| --- | --- | --- | --- |
-| LOCAL | http://127.0.0.1:5080/swagger | http://127.0.0.1:5080/swagger/v1/swagger.json | Development JSON enables OpenApi:Enabled |
-| DEV | http://127.0.0.1:18080/swagger | http://127.0.0.1:18080/swagger/v1/swagger.json | Compose explicitly enables it in Staging |
-| TEST | Test-controlled address | Test-controlled address | Ordinary hosts disable it; dedicated tests/smoke enable it explicitly |
-
-Use changed host ports in URLs if you override defaults. `/swagger/index.html` is
-the UI page. Base settings disable Swagger, including ordinary Production settings.
-Program gates both UI and JSON on the same `OpenApi:Enabled` setting.
-
-| Dependency state | /health | /ready |
-| --- | --- | --- |
-| PostgreSQL/schema ready; Redis available | 200 Healthy | 200 Healthy |
-| PostgreSQL/schema ready; Redis unavailable/unconfigured | 200 Healthy | 200 Degraded |
-| PostgreSQL unavailable/unconfigured/unmigrated | 200 Healthy | 503 Unhealthy |
-
-Liveness checks that the API can answer; it does not query dependencies. Readiness
-checks database connectivity/schema and optional Redis access. Degraded Redis does
-not necessarily prevent CRUD: the service can use PostgreSQL with slower reads.
-
-```bash
-curl --fail http://127.0.0.1:5080/health
-curl --fail http://127.0.0.1:5080/ready
-```
-
-Expect `Healthy` from both with LOCAL fully available. For DEV, use port 18080.
-A Compose dependency marked healthy means its server is available; migrations and
-application readiness are separate checks.
+LOCAL and DEV enable Swagger. `/health` is liveness; `/ready` retains application
+schema/database/cache readiness semantics. Run polls `/ready` from a temporary
+SDK container on the selected network for up to 120 attempts with bounded HTTP
+timeouts. Only HTTP success with body Healthy is accepted. Failure leaves runtime
+containers for diagnosis and prints exact migration/log commands including PROJECT.
+Do not assume every readiness error is a pending migration: inspect logs for
+connection, schema, and Redis failures before taking corrective action.
 
 ## Debugging
 
-1. Start LOCAL and select the Service.Api launch profile in the IDE. Supply the
-   same environment as the Quick Start API terminal.
-2. Set a breakpoint in ItemsController.Create or Get, then send the request in Swagger.
-3. Follow the [POST](ARCHITECTURE.md#post-items-walkthrough) or
-   [cached GET](ARCHITECTURE.md#get-itemsid-walkthrough) breakpoint sequence.
-4. For database issues, inspect `compose ... ps`, the selected connection and migration
-   result before changing code. For cache issues, inspect Redis logs and the readiness
-   body; a cache miss can legitimately reach the repository.
-5. For integration failures requiring PostgreSQL/Redis, run `./scripts/test.sh` in a
-   separate repository-root terminal. It provisions dedicated resources; do not point
-   fixture tests at LOCAL/DEV databases.
+Start LOCAL, edit source, and follow `make logs`. Watch applies supported edits or
+restarts on unsupported edits. Compiler errors appear in logs and require a source
+fix. Debugger attachment requires your IDE's explicit container process/source
+mapping support and any debugger tooling it needs; it is not configured here.
 
-Services log cache misses/not-found context at Debug, which is normally hidden.
-For a LOCAL debugging session, stop the current host API, retain the LOCAL
-connection exports in its terminal, and launch with a temporary category override:
+For optional host debugging, install SDK 8.0.303 and restore tools/packages. Start
+only PostgreSQL/Redis with raw Compose (below), supply host-mapped database/cache
+connections to your IDE, and use the Service.Api launch profile on port 5080.
+Stop the container API before binding that host port. Host debugging is an advanced
+alternative, never the meaning of `make run ENV=local`.
+
+## TEST overview
+
+`make unit`, `make integration`, and `make test` build a fresh tooling image from
+checked-out source. Unit uses a network-disabled tooling container with no
+providers. Provider runs get unique `service-test-*` projects, database service_test,
+real PostgreSQL/Redis with tmpfs storage, and ephemeral loopback ports. Tests connect
+by container DNS, not the mapped host ports. Tests never reuse LOCAL/DEV volumes.
+Existing fixtures/tests and counts remain authoritative; no test source is changed.
+
+Tooling containers and per-run image tags are cleaned on success, error, INT and
+TERM. Failure emits provider logs. Docker build cache may remain for faster reuse.
+Uncatchable termination/daemon failure cannot guarantee cleanup; recover only the
+reported owned project. See [Testing](TESTING.md) for test design and raw IDE testing.
+
+## Advanced / IDE / raw tooling
+
+These are not public Make targets:
 
 ```bash
-env 'Logging__LogLevel__Service.Api.Services=Debug' dotnet run --project src/Service.Api --launch-profile Service.Api
+./scripts/smoke.sh
+python3 scripts/certify-workflows.py
 ```
 
-`env` passes the dotted category name to this process without requiring it to be a
-Bash variable name. The override ends with that process. [Logging ownership](ARCHITECTURE.md#logging-and-exceptions)
-explains which component owns each event.
+### Workflow certification
+
+Advanced verification requires host Python 3, but uses containerized SDK tooling.
+Smoke proves the real published image's HTTP/Swagger/CRUD behavior with disposable
+providers. Certification verifies LOCAL/DEV topology, CRUD/cache/cascade,
+persistence through normal stop/recreation, and TEST/smoke success/failure/SIGTERM
+cleanup while preserving unrelated resources. It refuses occupied standard ports.
+Evidence lives under ignored `artifacts/workflows-<run-id>/`.
+
+### Guarded reset
+
+Only when intentionally deleting this selected standalone project's development
+data, invoke the advanced helper. It prints the project and requires typing delete:
+
+```bash
+bash scripts/develop.sh reset local
+```
+
+For explicit noninteractive disposal of an owned throwaway project:
+
+```bash
+bash scripts/develop.sh reset local service-local-mycheck delete
+```
+
+This removes project volumes, including PostgreSQL data and LOCAL build caches.
+It is irreversible. Reapply migrations afterward. No public reset target exists;
+normal stop never deletes volumes.
+
+### Raw container tooling
+
+Compile without adding another public target:
+
+```bash
+docker build --target tooling -t service-tooling .
+docker run --rm service-tooling dotnet build Service.sln --no-restore
+```
+
+For a focused unit test, run `dotnet test` with its project and filter in this same
+image. For EF against a running standalone LOCAL database, supply its configured
+credentials explicitly as environment and use `--network service-local_default`;
+the connection host is postgres, port 5432. No Docker socket is mounted into tooling.
+The reusable tooling command is `dotnet ef database update --project src/Service.Api`.
+
+### Raw host / IDE tooling
+
+Host SDK is optional and must match global.json. Direct EF authoring remains:
+
+```bash
+dotnet tool restore
+dotnet restore
+dotnet ef migrations add MeaningfulName --project src/Service.Api
+```
+
+Review generated migration/model changes using the contribution guidance below.
+Host provider tests require dedicated TEST resources and host-mapped connections;
+see Testing for the advanced recipe. Never point them at LOCAL/DEV databases.
+
+Raw dependency-only startup (advanced host debugging):
+
+```bash
+docker compose --env-file .env.local -p service-local -f docker/compose.local.yml up -d --wait postgres redis
+```
+
+Raw Compose follows normal shell interpolation precedence; unlike the Make helper,
+inherited exported values can override env-file settings. Do not mix workflows
+without checking the selected project and resolved configuration.
+
+## Future parent-repository reuse
+
+This repository exports:
+
+- Build context: repository root; Dockerfile targets tooling, development, runtime.
+- Development: SDK/watch with source at /source/src; keep /artifacts container-owned.
+- Runtime: non-root published Service.Api, container port 8080, no source mount.
+- HTTP checks: /health and /ready; readiness success is HTTP 200 body Healthy.
+- Configuration: ASPNETCORE_ENVIRONMENT, OpenApi__Enabled, ConnectionStrings__Postgres,
+  ConnectionStrings__Redis, Cache__KeyPrefix; credentials supplied at runtime.
+- Migrations: tooling target running `dotnet ef database update --project src/Service.Api`
+  on the parent's service network with the parent's database connection.
+
+A future parent may reuse these targets and service definitions under its own
+network/project/configuration; it must not call standalone migration commands
+against the wrong database. No parent repository implementation is included here.
 
 ## Troubleshooting
 
-| Symptom | Check | Action |
-| --- | --- | --- |
-| Wrong/missing SDK | `dotnet --list-sdks` and global.json | Install 8.0.303; the pin disables roll-forward. Reopen the terminal, then run `dotnet --version` from the repo |
-| PostgreSQL connection failure | `docker compose --env-file .env.local -f docker/compose.local.yml ps`; connection host/port/database | Start the correct dependencies; reload that workflow's exports. For DEV use its file and host migration port |
-| Redis unavailable / /ready Degraded | Redis container health/logs and ConnectionStrings:Redis | Restore the intended Redis endpoint; PostgreSQL fallback can still serve CRUD |
-| /ready Unhealthy | PostgreSQL logs, connection and migration result | Apply existing migrations to the intended database once it is reachable |
-| Swagger 404 | Environment and OpenApi:Enabled | Use the LOCAL launch profile or DEV Compose; remove unintended overrides and restart |
-| Port already in use | Existing API/Compose processes and configured ports | Stop your own conflicting process or choose documented host-port overrides; update URLs/connections. Do not stop unrelated services |
-| Migration/table missing | `dotnet ef database update --project src/Service.Api` with correct exports | Apply existing migrations; container health alone does not create tables |
-| Unexpected old rows | Same Compose project and persistent PostgreSQL volume | Data surviving `down` is expected. Delete only intended records; reset the volume only when all its data is disposable |
-| Integration infrastructure unavailable | Whether tests were launched directly without dedicated connections | Run `./scripts/test.sh`; isolated unit tests need no running infrastructure |
-| Workflow certification refuses to start | Ports 5080, 55432, 56379, 18080, 25432, 26379; concurrent Docker activity | Make the documented ports available without disrupting unrelated resources; read artifacts/workflows-&lt;run-id&gt; logs |
-
-Do not use `down -v` as routine troubleshooting. If a command fails, fix the reported
-setup problem before continuing to migration or application startup.
-
-## Docker layout
-
-```text
-Dockerfile
-docker/
-├── compose.local.yml
-├── compose.dev.yml
-└── compose.test.yml
-scripts/
-├── test.sh
-├── smoke.sh
-└── certify-workflows.py
-```
-
-One multi-stage Dockerfile builds with SDK 8.0.303 and runs
-`Service.Api.dll` as non-root on port 8080 in the ASP.NET 8 runtime. DEV and image
-smoke share it. The runtime image contains no credentials, SDK, curl or Docker HEALTHCHECK.
-Compose dependency health checks and host HTTP polling cover validation.
-
+| Symptom | Action |
+| --- | --- |
+| Docker unavailable | Start Docker, then rerun setup |
+| Unsupported ENV | Choose local or dev |
+| Readiness fails | Inspect make logs, verify connections/schema/cache, explicitly migrate if needed |
+| Port occupied | Stop your own conflicting environment or configure another host port |
+| Source changes not visible | Check LOCAL bind mount/watch logs; rebuild after dependency changes |
+| PostgreSQL data unexpectedly absent | Check ENV, PROJECT, POSTGRES_DB; do not reset as a repair shortcut |
+| Certification port refusal | Stop only your own conflicting stacks before retrying |
 
 ## Where changes go
 
@@ -518,8 +347,8 @@ differences rather than assuming a migration is harmless or complete.
 ## Creating and reviewing migrations
 
 Migrations are intentional, reviewed source changes. **API startup does not migrate.**
-After hypothetical Widget model/configuration changes, with the LOCAL setup and
-connection from the [Quick Start](../README.md#quick-start), the authoring command is:
+This is optional host/IDE tooling: install the pinned SDK and restore packages first.
+After an intentional model/configuration change, the authoring command is:
 
 ```bash
 dotnet tool restore
@@ -531,7 +360,7 @@ Do not run it just to follow this guide without making an intended schema change
 
 1. Inspect generated `Up`, `Down`, designer metadata and the `ServiceDbContextModelSnapshot` diff. Never blindly commit generated output. Check column types/nullability/defaults, data loss or conversion needs, FK targets, indexes, constraints and delete behavior.
 2. Confirm the diff contains only intended schema changes. An unrelated drop/rename or broad snapshot change needs investigation before application. Review rollback data-loss implications even when Down compiles.
-3. Apply to LOCAL with `dotnet ef database update --project src/Service.Api`. Verify the selected connection first and preserve any data you need; a destructive LOCAL reset is not required for ordinary migration work.
+3. Apply to LOCAL with `make migrate ENV=local`. Verify the selected configuration first and preserve any data you need; a destructive LOCAL reset is not required for ordinary migration work.
 4. Update intentional schema expectations in [SchemaContractTests](../tests/Service.Api.IntegrationTests/Infrastructure/Database/SchemaContractTests.cs) and relevant persistence/health tests. Run the [full automated suite](TESTING.md#commands); generated TEST databases provide clean application without deleting LOCAL data.
 5. Review [MigrationTests](../tests/Service.Api.IntegrationTests/Infrastructure/Database/MigrationTests.cs): retain evidence for clean migration application, rollback/reapplication, already-current state and no pending model changes. The current tests assert a single InitialCreate migration and the exact Items/Actions table set; update those expectations intentionally when adding a migration/table. Extend cases when a new migration introduces an upgrade/data transformation that current tests do not exercise.
 6. Check that the model and snapshot agree with the command below, then review the entire diff again. This check does not prove safe data migration or replace real PostgreSQL tests.

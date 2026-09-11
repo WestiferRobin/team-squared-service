@@ -116,9 +116,8 @@ class Workflow:
     def config(self):
         config = json.loads(self.call('config', '--format', 'json'))
         services = config['services']
-        assert set(services) == ({'postgres', 'redis'} if self.mode == 'local'
-                                 else {'postgres', 'redis', 'service-api'})
-        ports = {'postgres': 55432, 'redis': 56379} if self.mode == 'local' else {
+        assert set(services) == {'postgres', 'redis', 'service-api'}
+        ports = {'postgres': 55432, 'redis': 56379, 'service-api': 5080} if self.mode == 'local' else {
             'postgres': 25432, 'redis': 26379, 'service-api': 18080}
         for name, service in services.items():
             assert 'container_name' not in service
@@ -151,50 +150,39 @@ class Workflow:
         return ports
 
     def start_api(self, build=False):
-        if self.mode == 'dev':
-            self.call('up', '-d', *(['--build'] if build else []), 'service-api')
-            api_id = self.call('ps', '-q', 'service-api').strip()
-            actual = json.loads(run(['docker', 'inspect', api_id]))[0]
-            assert 'ASPNETCORE_ENVIRONMENT=Staging' in actual['Config']['Env']
-            assert 'ASPNETCORE_HTTP_PORTS=8080' in actual['Config']['Env']
-        else:
-            env = dict(self.env, ASPNETCORE_ENVIRONMENT='Development', Cache__KeyPrefix='service-local',
-                       ConnectionStrings__Postgres=self.connection,
-                       ConnectionStrings__Redis='127.0.0.1:56379,connectTimeout=1000,asyncTimeout=1000,connectRetry=0')
-            self.api_log = (LOGS / f'local-api-{time.time_ns()}.log').open('w')
-            self.api = subprocess.Popen(['dotnet', 'run', '--no-build', '--project', 'src/Service.Api',
-                                         '--launch-profile', 'Service.Api'], cwd=ROOT, env=env,
-                                        stdout=self.api_log, stderr=subprocess.STDOUT, start_new_session=True)
-        ready(self.base)
+        self.call('up', '-d', *(['--build'] if build else []), 'service-api')
+        api_id = self.call('ps', '-q', 'service-api').strip()
+        actual = json.loads(run(['docker', 'inspect', api_id]))[0]
+        environment = 'Development' if self.mode == 'local' else 'Staging'
+        assert f'ASPNETCORE_ENVIRONMENT={environment}' in actual['Config']['Env']
+        assert 'ASPNETCORE_HTTP_PORTS=8080' in actual['Config']['Env']
         if self.mode == 'local':
-            assert self.api.poll() is None
-            text = Path(self.api_log.name).read_text()
-            assert 'Development' in text and 'http://127.0.0.1:5080' in text
+            assert any(m['Type'] == 'bind' and m['Destination'] == '/source/src' and not m['RW'] for m in actual['Mounts'])
+            assert 'watch' in actual['Config']['Cmd']
+        else:
+            assert not actual['Mounts'], 'DEV runtime must have no source mounts'
+            assert actual['Config']['User'] not in ('', '0', 'root')
+        ready(self.base)
         for name in ('postgres', 'redis'):
             cid = self.call('ps', '-q', name).strip()
             assert json.loads(run(['docker', 'inspect', cid]))[0]['State']['Health']['Status'] == 'healthy'
 
     def stop_api(self):
-        if self.api is not None:
-            if self.api.poll() is None:
-                os.killpg(self.api.pid, signal.SIGTERM)
-                try:
-                    self.api.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    os.killpg(self.api.pid, signal.SIGKILL)
-                    self.api.wait(timeout=5)
-            self.api = None
-            self.api_log.close()
+        # Compose owns the API in both modes; normal down below stops it.
+        pass
 
     def start(self):
         ports = self.config()
         self.created = True  # Also clean partial provisioning failures.
         self.call('up', '-d', '--wait', '--wait-timeout', '60', 'postgres', 'redis')
-        self.connection = (f'Host=127.0.0.1;Port={ports["postgres"]};Database=service_{self.mode};'
-                           'Username=service;Password=workflow_test_only')
-        run(['dotnet', 'ef', 'database', 'update', '--project', 'src/Service.Api'],
-            dict(self.env, ConnectionStrings__Postgres=self.connection,
-                 ASPNETCORE_ENVIRONMENT='Development' if self.mode == 'local' else 'Staging'))
+        tool_image = f'{self.project}-tooling'
+        try:
+            run(['docker', 'build', '--target', 'tooling', '-t', tool_image, '.'])
+            run(['docker', 'run', '--rm', '--network', f'{self.project}_default',
+                 '-e', f'ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=service_{self.mode};Username=service;Password=workflow_test_only',
+                 tool_image, 'dotnet', 'ef', 'database', 'update', '--project', 'src/Service.Api'])
+        finally:
+            run(['docker', 'image', 'rm', tool_image])
         self.start_api(build=True)
         self.crud()
         self.item = json.loads(request(self.base, 'POST', '/items', 201,
@@ -301,12 +289,11 @@ def main():
     # Never stop existing listeners to make room for certification.
     for port in (5080, 55432, 56379, 18080, 25432, 26379):
         with socket.socket() as listener:
+            # Ignore TIME_WAIT from a just-stopped stack, never an active listener.
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(('127.0.0.1', port))
     local, dev = Workflow('local'), Workflow('dev')
     try:
-        run(['dotnet', 'tool', 'restore'])
-        run(['dotnet', 'restore'])
-        run(['dotnet', 'build', 'Service.sln'])
         test_config = json.loads(run(['docker', 'compose', '--env-file', '/dev/null', '-p', f'service-cert-test-{RUN}',
                                      '-f', 'docker/compose.test.yml', 'config', '--format', 'json']))
         assert set(test_config['services']) == {'postgres', 'redis'}
